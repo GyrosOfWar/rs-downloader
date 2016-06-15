@@ -6,6 +6,6 @@ authors = ["Martin Tomasi <martin.tomasi@gmail.com>"]
 [dependencies]
 scoped_threadpool = "*"
 crossbeam = "*"
-hyper = { version = "*", default-features = false }
+hyper = "*"
 quick-error = "*"
 thread-id = "*"

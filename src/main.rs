@@ -6,17 +6,25 @@ extern crate quick_error;
 extern crate thread_id;
 
 use std::path::{Path, PathBuf};
-use std::{io, env};
+use std::{io, env, iter};
 use std::io::prelude::*;
 use std::fs::File;
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use hyper::client::IntoUrl;
 use hyper::{Client, Url};
 use hyper::header::ContentLength;
 use scoped_threadpool::Pool;
 use crossbeam::sync::MsQueue;
+
+macro_rules! printfl {
+    ($($tt:tt)*) => {{
+        print!($($tt)*);
+        ::std::io::stdout().flush().ok().expect("flush() fail");
+    }}
+}
 
 pub struct Watcher<R, F> {
     pub inner: R,
@@ -81,7 +89,7 @@ struct WorkItem {
 enum Message {
     Start {
         thread_id: usize,
-        file_id: u32,
+        file_name: String,
         file_size: Option<u64>,
     },
     Downloading {
@@ -100,10 +108,21 @@ enum Message {
 
 #[derive(Debug)]
 struct Progress {
-    file_id: u32,
+    file_name: String,
     file_size: Option<u64>,
     progress: u64,
     error: Option<DError>,
+}
+
+impl Progress {
+    pub fn new() -> Progress {
+        Progress {
+            file_name: String::new(),
+            file_size: None,
+            progress: 0,
+            error: None
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -119,10 +138,10 @@ impl DownloadWatcher {
     pub fn process(&mut self, message: Message) -> bool {
         match message {
             Message::Done => return true,
-            Message::Start { thread_id, file_id, file_size } => {
+            Message::Start { thread_id, file_name, file_size } => {
                 self.status_map.insert(thread_id,
                                        Progress {
-                                           file_id: file_id,
+                                           file_name: file_name,
                                            file_size: file_size,
                                            progress: 0,
                                            error: None,
@@ -136,7 +155,7 @@ impl DownloadWatcher {
                 e.progress += bytes_read;
             },
             Message::Error { err, thread_id } => {
-                let mut e = self.status_map.get_mut(&thread_id).unwrap();
+                let e = self.status_map.entry(thread_id).or_insert(Progress::new());
                 e.error = Some(err);
             }
         }
@@ -145,16 +164,12 @@ impl DownloadWatcher {
 
     pub fn output(&self) {
         let mut s = String::new();
-        
-        for (thread_id, progress) in &self.status_map {
-            let size = match progress.file_size {
-                Some(s) => format!("{}", s),
-                None => String::from("?")
-            };
-            s.push_str(&format!( "{}: {}/{}\n", thread_id, progress.progress, size));
+        for progress in self.status_map.values() {
+            s.push_str(&format!("{}, ", progress.file_name));
         }
-        s.pop();
-        println!("\r{}", s);
+        let spaces: String = iter::repeat(' ').take(80).collect();
+        // printfl!("\r{}", spaces);
+        printfl!("\r{}", s);
     }
 }
 
@@ -172,6 +187,10 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
     where U: IntoUrl,
           P: AsRef<Path>
 {
+    if urls.len() != paths.len() {
+        panic!("Not enough paths for URLs")
+    }
+    
     let workitem_queue = MsQueue::new();
     let mut i = 0;
     for (url, path) in urls.into_iter().zip(paths.into_iter()) {
@@ -196,11 +215,13 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
             scope.execute(move || {
                 let request = try_or_send!(client.get(item.url).send(), message_queue);
                 let length = request.headers.get::<ContentLength>().map(|c| c.0);
-                let mut writer = try_or_send!(File::create(item.path), message_queue);
-
+                let path = item.path;
+                let mut writer = try_or_send!(File::create(path.clone()), message_queue);
+                let file_name: String = path.file_name().unwrap().to_str().unwrap().into();
+                
                 message_queue.push(Message::Start {
                     thread_id: thread_id::get(),
-                    file_id: item.id,
+                    file_name: file_name,
                     file_size: length,
                 });
                 try_or_send!(io::copy(
@@ -216,43 +237,44 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
                 message_queue.push(Message::Success { thread_id: thread_id::get() });
             });
         }
-    });
-    let message_queue = message_queue.clone();
-    message_queue.push(Message::Done);
-    let mut download_watcher = DownloadWatcher::new();
-    loop {
-        let msg = message_queue.pop();
-        if download_watcher.process(msg) {
-            break;
+        
+        let mut download_watcher = DownloadWatcher::new();
+        loop {    
+            let msg = message_queue.pop();
+            if download_watcher.process(msg) {
+                break;
+            }
+            download_watcher.output();
         }
-        download_watcher.output();
-    }
+    });
+    message_queue.push(Message::Done); 
 
     Ok(())
 }
-
 
 fn main() {
     let args: Vec<_> = env::args().collect();
     let mut urls = vec![];
     let mut paths: Vec<String> = vec![];
 
-    for url in &args[1..] {
-        let url = Url::parse(url).unwrap();
-        paths.push(url.path().into());
-        urls.push(url);
+    if let Some(idx) = args.iter().position(|c| c == "-f") {
+        let filename = args.get(idx + 1).expect("Missing argument to -f");
+        let reader = io::BufReader::new(File::open(filename).unwrap());
+        for (idx, line) in reader.lines().enumerate() {
+            let url = Url::parse(line.unwrap().trim()).unwrap();
+            let k = url.path().rfind('/').unwrap();
+            let name = &url.path()[k+1..];
+            paths.push(format!("downloads/{}", name));
+            urls.push(url.clone());
+
+        }
     }
-
-    // let urls: Vec<Url> = args[1..].iter(),map()
-
-    // let paths: Vec<_> = urls.iter().map(|u| {
-    //     let path = determine_filename(u).unwrap();
-    //     if path == "/" {
-    //         String::from("index.html")
-    //     } else {
-    //         path
-    //     }
-    // }).collect();
-
-    download_in_parallel(urls, &paths, 2).unwrap();
+    else {
+        for url in &args[1..] {
+            let url = Url::parse(url).unwrap();
+            paths.push(url.path().into());
+            urls.push(url);
+        }
+    }
+    download_in_parallel(urls, &paths, 8).unwrap();
 }
