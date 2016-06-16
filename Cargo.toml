@@ -6,6 +6,7 @@ version = "0.1.0"
 [dependencies]
 crossbeam = "*"
 hyper = "*"
+number_prefix = "0.2.5"
 quick-error = "*"
 rustbox = "0.8.1"
 scoped_threadpool = "*"

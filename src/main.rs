@@ -5,21 +5,23 @@ extern crate crossbeam;
 extern crate quick_error;
 extern crate thread_id;
 extern crate rustbox;
+extern crate number_prefix;
 
 use std::path::{Path, PathBuf};
 use std::{io, env, thread};
 use std::io::prelude::*;
 use std::fs::File;
 use std::sync::Arc;
-use std::time::Duration;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use hyper::client::IntoUrl;
 use hyper::{Client, Url};
 use hyper::header::ContentLength;
 use scoped_threadpool::Pool;
 use crossbeam::sync::MsQueue;
-use rustbox::{RustBox, Color};
+use rustbox::{RustBox, Color, Key};
+use number_prefix::{decimal_prefix, Standalone, Prefixed};
 
 macro_rules! printfl {
     ($($tt:tt)*) => {{
@@ -108,6 +110,13 @@ enum Message {
     Done,
 }
 
+fn fmt_bytes(bytes: u64) -> String {
+    match decimal_prefix(bytes as f32) {
+        Standalone(bytes) => format!("{} bytes", bytes),
+        Prefixed(prefix, n) => format!("{:.0} {}B", n, prefix)
+    }
+}
+
 #[derive(Debug)]
 struct Progress {
     file_name: String,
@@ -125,22 +134,45 @@ impl Progress {
             error: None
         }
     }
+    fn fmt_file_size(&self) -> String {
+        match self.file_size {
+            Some(sz) => fmt_bytes(sz),
+            None => String::from("?")
+        }
+    }
+
+    fn fmt_progress_percent(&self) -> String {
+        match self.file_size {
+            Some(sz) => format!("{:.2}%", (self.progress as f64 / sz as f64) * 100.0),
+            None => String::new()
+        }
+    }
+
+    fn fmt_progress_bytes(&self) -> String {
+        fmt_bytes(self.progress)
+    }
 }
 
 struct DownloadWatcher {
     status_map: HashMap<usize, Progress>,
-    rustbox: RustBox
+    rustbox: RustBox,
+    quitting: bool,
 }
 
 impl DownloadWatcher {
     pub fn new() -> DownloadWatcher {
         DownloadWatcher { 
             status_map: HashMap::new(),
-            rustbox: RustBox::init(Default::default()).unwrap()
+            rustbox: RustBox::init(Default::default()).unwrap(),
+            quitting: false
         }
     }
 
     pub fn process(&mut self, message: Message) -> bool {
+        if self.quitting {
+            return true;
+        }
+        
         match message {
             Message::Done => return true,
             Message::Start { thread_id, file_name, file_size } => {
@@ -167,14 +199,35 @@ impl DownloadWatcher {
         false
     }
 
-    pub fn output(&self) {
-        self.rustbox.clear();
-
+    pub fn output(&mut self) {        
+        self.rustbox.clear();        
         for (y, progress) in self.status_map.values().enumerate() {
-            self.rustbox.print(0, y, rustbox::RB_NORMAL, Color::White, Color::Black, &format!("{:?}", progress));
+            let name = if progress.file_name.len() >= 40 {
+                &progress.file_name[..40]
+            } else {
+                &progress.file_name
+            };
+
+            let p = format!("{}/{}", progress.fmt_progress_bytes(), progress.fmt_file_size());
+            self.rustbox.print(0, y, rustbox::RB_NORMAL, Color::White, Color::Black, name);
+            self.rustbox.print(40, y, rustbox::RB_NORMAL, Color::White, Color::Black, &progress.fmt_progress_percent());
+            self.rustbox.print(50, y, rustbox::RB_NORMAL, Color::White, Color::Black, &p);      
         }
 
         self.rustbox.present();
+
+        match self.rustbox.peek_event(Duration::from_millis(16), false) {
+            Ok(rustbox::Event::KeyEvent(key)) => {
+                match key {
+                    Key::Char('q') => self.quitting = true,
+                    _ => {}
+                }
+            },
+            Err(e) => panic!("{}", e),
+            _ => {}
+            
+        }
+        
     }
 }
 
@@ -243,9 +296,10 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
             });
         }
         let message_queue = message_queue.clone();
+        // Progress watcher thread
         thread::spawn(move || {
             let mut download_watcher = DownloadWatcher::new();
-            loop {    
+            loop {
                 let msg = message_queue.pop();
                 if download_watcher.process(msg) {
                     break;
@@ -283,5 +337,6 @@ fn main() {
             urls.push(url);
         }
     }
+    // TODO make thread count configurable
     download_in_parallel(urls, &paths, 8).unwrap();
 }
