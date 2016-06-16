@@ -7,7 +7,7 @@ extern crate thread_id;
 extern crate rustbox;
 
 use std::path::{Path, PathBuf};
-use std::{io, env};
+use std::{io, env, thread};
 use std::io::prelude::*;
 use std::fs::File;
 use std::sync::Arc;
@@ -242,17 +242,19 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
                 message_queue.push(Message::Success { thread_id: thread_id::get() });
             });
         }
-        
-        let mut download_watcher = DownloadWatcher::new();
-        loop {    
-            let msg = message_queue.pop();
-            if download_watcher.process(msg) {
-                break;
+        let message_queue = message_queue.clone();
+        thread::spawn(move || {
+            let mut download_watcher = DownloadWatcher::new();
+            loop {    
+                let msg = message_queue.pop();
+                if download_watcher.process(msg) {
+                    break;
+                }
+                download_watcher.output();
             }
-            download_watcher.output();
-        }
+        });
     });
-    message_queue.push(Message::Done); 
+    message_queue.push(Message::Done);
 
     Ok(())
 }
