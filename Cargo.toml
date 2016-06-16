@@ -1,11 +1,12 @@
 [package]
+authors = ["Martin Tomasi <martin.tomasi@gmail.com>"]
 name = "downloader"
 version = "0.1.0"
-authors = ["Martin Tomasi <martin.tomasi@gmail.com>"]
 
 [dependencies]
-scoped_threadpool = "*"
 crossbeam = "*"
 hyper = "*"
 quick-error = "*"
+rustbox = "0.8.1"
+scoped_threadpool = "*"
 thread-id = "*"

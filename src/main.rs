@@ -4,20 +4,22 @@ extern crate crossbeam;
 #[macro_use]
 extern crate quick_error;
 extern crate thread_id;
+extern crate rustbox;
 
 use std::path::{Path, PathBuf};
-use std::{io, env, iter};
+use std::{io, env};
 use std::io::prelude::*;
 use std::fs::File;
 use std::sync::Arc;
+use std::time::Duration;
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 
 use hyper::client::IntoUrl;
 use hyper::{Client, Url};
 use hyper::header::ContentLength;
 use scoped_threadpool::Pool;
 use crossbeam::sync::MsQueue;
+use rustbox::{RustBox, Color};
 
 macro_rules! printfl {
     ($($tt:tt)*) => {{
@@ -125,14 +127,17 @@ impl Progress {
     }
 }
 
-#[derive(Debug)]
 struct DownloadWatcher {
     status_map: HashMap<usize, Progress>,
+    rustbox: RustBox
 }
 
 impl DownloadWatcher {
     pub fn new() -> DownloadWatcher {
-        DownloadWatcher { status_map: HashMap::new() }
+        DownloadWatcher { 
+            status_map: HashMap::new(),
+            rustbox: RustBox::init(Default::default()).unwrap()
+        }
     }
 
     pub fn process(&mut self, message: Message) -> bool {
@@ -163,13 +168,13 @@ impl DownloadWatcher {
     }
 
     pub fn output(&self) {
-        let mut s = String::new();
-        for progress in self.status_map.values() {
-            s.push_str(&format!("{}, ", progress.file_name));
+        self.rustbox.clear();
+
+        for (y, progress) in self.status_map.values().enumerate() {
+            self.rustbox.print(0, y, rustbox::RB_NORMAL, Color::White, Color::Black, &format!("{:?}", progress));
         }
-        let spaces: String = iter::repeat(' ').take(80).collect();
-        // printfl!("\r{}", spaces);
-        printfl!("\r{}", s);
+
+        self.rustbox.present();
     }
 }
 
@@ -260,7 +265,7 @@ fn main() {
     if let Some(idx) = args.iter().position(|c| c == "-f") {
         let filename = args.get(idx + 1).expect("Missing argument to -f");
         let reader = io::BufReader::new(File::open(filename).unwrap());
-        for (idx, line) in reader.lines().enumerate() {
+        for line in reader.lines() {
             let url = Url::parse(line.unwrap().trim()).unwrap();
             let k = url.path().rfind('/').unwrap();
             let name = &url.path()[k+1..];
