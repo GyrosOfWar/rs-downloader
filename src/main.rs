@@ -6,9 +6,10 @@ extern crate quick_error;
 extern crate thread_id;
 extern crate rustbox;
 extern crate number_prefix;
+extern crate clap;
 
 use std::path::{Path, PathBuf};
-use std::{io, env, thread};
+use std::{io, thread};
 use std::io::prelude::*;
 use std::fs::File;
 use std::sync::Arc;
@@ -22,13 +23,7 @@ use scoped_threadpool::Pool;
 use crossbeam::sync::MsQueue;
 use rustbox::{RustBox, Color, Key};
 use number_prefix::{decimal_prefix, Standalone, Prefixed};
-
-macro_rules! printfl {
-    ($($tt:tt)*) => {{
-        print!($($tt)*);
-        ::std::io::stdout().flush().ok().expect("flush() fail");
-    }}
-}
+use clap::{App, Arg};
 
 pub struct Watcher<R, F> {
     pub inner: R,
@@ -113,7 +108,7 @@ enum Message {
 fn fmt_bytes(bytes: u64) -> String {
     match decimal_prefix(bytes as f32) {
         Standalone(bytes) => format!("{} bytes", bytes),
-        Prefixed(prefix, n) => format!("{:.0} {}B", n, prefix)
+        Prefixed(prefix, n) => format!("{:.0} {}B", n, prefix),
     }
 }
 
@@ -131,20 +126,20 @@ impl Progress {
             file_name: String::new(),
             file_size: None,
             progress: 0,
-            error: None
+            error: None,
         }
     }
     fn fmt_file_size(&self) -> String {
         match self.file_size {
             Some(sz) => fmt_bytes(sz),
-            None => String::from("?")
+            None => String::from("?"),
         }
     }
 
     fn fmt_progress_percent(&self) -> String {
         match self.file_size {
             Some(sz) => format!("{:.2}%", (self.progress as f64 / sz as f64) * 100.0),
-            None => String::new()
+            None => String::new(),
         }
     }
 
@@ -161,10 +156,10 @@ struct DownloadWatcher {
 
 impl DownloadWatcher {
     pub fn new() -> DownloadWatcher {
-        DownloadWatcher { 
+        DownloadWatcher {
             status_map: HashMap::new(),
             rustbox: RustBox::init(Default::default()).unwrap(),
-            quitting: false
+            quitting: false,
         }
     }
 
@@ -172,7 +167,7 @@ impl DownloadWatcher {
         if self.quitting {
             return true;
         }
-        
+
         match message {
             Message::Done => return true,
             Message::Start { thread_id, file_name, file_size } => {
@@ -190,7 +185,7 @@ impl DownloadWatcher {
             Message::Downloading { thread_id, bytes_read } => {
                 let mut e = self.status_map.get_mut(&thread_id).unwrap();
                 e.progress += bytes_read;
-            },
+            }
             Message::Error { err, thread_id } => {
                 let e = self.status_map.entry(thread_id).or_insert(Progress::new());
                 e.error = Some(err);
@@ -199,8 +194,8 @@ impl DownloadWatcher {
         false
     }
 
-    pub fn output(&mut self) {        
-        self.rustbox.clear();        
+    pub fn output(&mut self) {
+        self.rustbox.clear();
         for (y, progress) in self.status_map.values().enumerate() {
             let name = if progress.file_name.len() >= 40 {
                 &progress.file_name[..40]
@@ -208,10 +203,17 @@ impl DownloadWatcher {
                 &progress.file_name
             };
 
-            let p = format!("{}/{}", progress.fmt_progress_bytes(), progress.fmt_file_size());
+            let p = format!("{}/{}",
+                            progress.fmt_progress_bytes(),
+                            progress.fmt_file_size());
             self.rustbox.print(0, y, rustbox::RB_NORMAL, Color::White, Color::Black, name);
-            self.rustbox.print(40, y, rustbox::RB_NORMAL, Color::White, Color::Black, &progress.fmt_progress_percent());
-            self.rustbox.print(50, y, rustbox::RB_NORMAL, Color::White, Color::Black, &p);      
+            self.rustbox.print(40,
+                               y,
+                               rustbox::RB_NORMAL,
+                               Color::White,
+                               Color::Black,
+                               &progress.fmt_progress_percent());
+            self.rustbox.print(50, y, rustbox::RB_NORMAL, Color::White, Color::Black, &p);
         }
 
         self.rustbox.present();
@@ -222,12 +224,10 @@ impl DownloadWatcher {
                     Key::Char('q') => self.quitting = true,
                     _ => {}
                 }
-            },
+            }
             Err(e) => panic!("{}", e),
             _ => {}
-            
         }
-        
     }
 }
 
@@ -248,7 +248,7 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
     if urls.len() != paths.len() {
         panic!("Not enough paths for URLs")
     }
-    
+
     let workitem_queue = MsQueue::new();
     let mut i = 0;
     for (url, path) in urls.into_iter().zip(paths.into_iter()) {
@@ -276,21 +276,20 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
                 let path = item.path;
                 let mut writer = try_or_send!(File::create(path.clone()), message_queue);
                 let file_name: String = path.file_name().unwrap().to_str().unwrap().into();
-                
+
                 message_queue.push(Message::Start {
                     thread_id: thread_id::get(),
                     file_name: file_name,
                     file_size: length,
                 });
-                try_or_send!(io::copy(
-                    &mut request.watch(|n| {
-                        message_queue.push(Message::Downloading {
-                            bytes_read: n as u64,
-                            thread_id: thread_id::get(),
-                        })
-                    }),
-                    &mut writer
-                ), message_queue);
+                try_or_send!(io::copy(&mut request.watch(|n| {
+                                          message_queue.push(Message::Downloading {
+                                              bytes_read: n as u64,
+                                              thread_id: thread_id::get(),
+                                          })
+                                      }),
+                                      &mut writer),
+                             message_queue);
 
                 message_queue.push(Message::Success { thread_id: thread_id::get() });
             });
@@ -313,30 +312,44 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
     Ok(())
 }
 
-fn main() {
-    let args: Vec<_> = env::args().collect();
+fn read_urls(path: &str) -> (Vec<Url>, Vec<String>) {
     let mut urls = vec![];
-    let mut paths: Vec<String> = vec![];
+    let mut paths = vec![];
 
-    if let Some(idx) = args.iter().position(|c| c == "-f") {
-        let filename = args.get(idx + 1).expect("Missing argument to -f");
-        let reader = io::BufReader::new(File::open(filename).unwrap());
-        for line in reader.lines() {
-            let url = Url::parse(line.unwrap().trim()).unwrap();
-            let k = url.path().rfind('/').unwrap();
-            let name = &url.path()[k+1..];
-            paths.push(format!("downloads/{}", name));
-            urls.push(url.clone());
+    let reader = io::BufReader::new(File::open(path).unwrap());
 
-        }
+    for line in reader.lines() {
+        let url = Url::parse(line.unwrap().trim()).unwrap();
+        let k = url.path().rfind('/').unwrap();
+        let name = &url.path()[k + 1..];
+        paths.push(format!("downloads/{}", name));
+        urls.push(url.clone());
     }
-    else {
-        for url in &args[1..] {
-            let url = Url::parse(url).unwrap();
-            paths.push(url.path().into());
-            urls.push(url);
-        }
-    }
-    // TODO make thread count configurable
-    download_in_parallel(urls, &paths, 8).unwrap();
+
+    (urls, paths)
+}
+
+fn main() {
+    let matches = App::new("downloader")
+        .version("0.1.0")
+        .author("Martin Tomasi <martin.tomasi@gmail.com>")
+        .about("Downloads multiple files in parallel.")
+        .arg(Arg::with_name("file")
+             .short("f")
+             .long("file")
+             .help("Text file with an URL on each line")
+             .takes_value(true)
+             .required(true))
+        .arg(Arg::with_name("threads")
+             .short("t")
+             .long("threads")
+             .help("Sets the number of concurrent downloads")
+             .takes_value(true))
+        .get_matches();
+
+    let filepath = matches.value_of("file").unwrap();
+    let (urls, paths) = read_urls(&filepath);
+
+    let thread_count = matches.value_of("threads").map(|s| s.parse::<u32>().unwrap()).unwrap_or(4);
+    download_in_parallel(urls, &paths, thread_count).unwrap();
 }

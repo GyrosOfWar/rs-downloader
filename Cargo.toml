@@ -4,6 +4,7 @@ name = "downloader"
 version = "0.1.0"
 
 [dependencies]
+clap = "2.6.0"
 crossbeam = "*"
 hyper = "*"
 number_prefix = "0.2.5"
