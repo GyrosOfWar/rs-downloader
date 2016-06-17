@@ -86,7 +86,7 @@ struct WorkItem {
 
 #[derive(Debug)]
 enum Message {
-    Start {
+    StartFile {
         thread_id: usize,
         file_name: String,
         file_size: Option<u64>,
@@ -152,14 +152,18 @@ struct DownloadWatcher {
     status_map: HashMap<usize, Progress>,
     rustbox: RustBox,
     quitting: bool,
+    num_files: usize,
+    files_finished: usize,
 }
 
 impl DownloadWatcher {
-    pub fn new() -> DownloadWatcher {
+    pub fn new(num_files: usize) -> DownloadWatcher {
         DownloadWatcher {
             status_map: HashMap::new(),
             rustbox: RustBox::init(Default::default()).unwrap(),
             quitting: false,
+            num_files: num_files,
+            files_finished: 0
         }
     }
 
@@ -170,7 +174,7 @@ impl DownloadWatcher {
 
         match message {
             Message::Done => return true,
-            Message::Start { thread_id, file_name, file_size } => {
+            Message::StartFile { thread_id, file_name, file_size } => {
                 self.status_map.insert(thread_id,
                                        Progress {
                                            file_name: file_name,
@@ -181,6 +185,7 @@ impl DownloadWatcher {
             }
             Message::Success { thread_id } => {
                 self.status_map.remove(&thread_id);
+                self.files_finished += 1;
             }
             Message::Downloading { thread_id, bytes_read } => {
                 let mut e = self.status_map.get_mut(&thread_id).unwrap();
@@ -196,7 +201,10 @@ impl DownloadWatcher {
 
     pub fn output(&mut self) {
         self.rustbox.clear();
+        self.rustbox.print(0, 0, rustbox::RB_NORMAL, Color::White, Color::Black, &format!("Files downloaded: {}/{}", self.files_finished, self.num_files));
+        
         for (y, progress) in self.status_map.values().enumerate() {
+            let y = y + 1;
             let name = if progress.file_name.len() >= 40 {
                 &progress.file_name[..40]
             } else {
@@ -205,7 +213,7 @@ impl DownloadWatcher {
 
             let p = format!("{}/{}",
                             progress.fmt_progress_bytes(),
-                            progress.fmt_file_size());
+                            progress.fmt_file_size());                        
             self.rustbox.print(0, y, rustbox::RB_NORMAL, Color::White, Color::Black, name);
             self.rustbox.print(40,
                                y,
@@ -249,6 +257,7 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
         panic!("Not enough paths for URLs")
     }
 
+    let file_count = urls.len();    
     let workitem_queue = MsQueue::new();
     let mut i = 0;
     for (url, path) in urls.into_iter().zip(paths.into_iter()) {
@@ -264,7 +273,7 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
 
     let mut pool = Pool::new(thread_count);
     let client = Arc::new(Client::new());
-
+    
     let message_queue = Arc::new(MsQueue::new());
     pool.scoped(|scope| {
         while let Some(item) = workitem_queue.try_pop() {
@@ -277,7 +286,7 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
                 let mut writer = try_or_send!(File::create(path.clone()), message_queue);
                 let file_name: String = path.file_name().unwrap().to_str().unwrap().into();
 
-                message_queue.push(Message::Start {
+                message_queue.push(Message::StartFile {
                     thread_id: thread_id::get(),
                     file_name: file_name,
                     file_size: length,
@@ -297,7 +306,7 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
         let message_queue = message_queue.clone();
         // Progress watcher thread
         thread::spawn(move || {
-            let mut download_watcher = DownloadWatcher::new();
+            let mut download_watcher = DownloadWatcher::new(file_count);
             loop {
                 let msg = message_queue.pop();
                 if download_watcher.process(msg) {
