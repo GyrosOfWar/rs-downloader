@@ -1,3 +1,7 @@
+#![cfg_attr(feature="clippy", feature(plugin))]
+#![cfg_attr(feature="clippy", plugin(clippy))]
+#![allow(enum_variant_names)]
+
 extern crate hyper;
 extern crate scoped_threadpool;
 extern crate crossbeam;
@@ -8,13 +12,15 @@ extern crate rustbox;
 extern crate number_prefix;
 extern crate clap;
 
+mod util;
+
 use std::path::{Path, PathBuf};
 use std::{io, thread};
 use std::io::prelude::*;
 use std::fs::File;
 use std::sync::Arc;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hyper::client::IntoUrl;
 use hyper::{Client, Url};
@@ -24,6 +30,8 @@ use crossbeam::sync::MsQueue;
 use rustbox::{RustBox, Color, Key};
 use number_prefix::{decimal_prefix, Standalone, Prefixed};
 use clap::{App, Arg};
+
+use util::DurationExt;
 
 pub struct Watcher<R, F> {
     pub inner: R,
@@ -105,8 +113,8 @@ enum Message {
     Done,
 }
 
-fn fmt_bytes(bytes: u64) -> String {
-    match decimal_prefix(bytes as f32) {
+fn fmt_bytes(bytes: f32) -> String {
+    match decimal_prefix(bytes) {
         Standalone(bytes) => format!("{} bytes", bytes),
         Prefixed(prefix, n) => format!("{:.0} {}B", n, prefix),
     }
@@ -118,6 +126,8 @@ struct Progress {
     file_size: Option<u64>,
     progress: u64,
     error: Option<DError>,
+    start_time: Instant,
+    download_rate: f64,
 }
 
 impl Progress {
@@ -127,11 +137,14 @@ impl Progress {
             file_size: None,
             progress: 0,
             error: None,
+            start_time: Instant::now(),
+            download_rate: 0.0
         }
     }
+    
     fn fmt_file_size(&self) -> String {
         match self.file_size {
-            Some(sz) => fmt_bytes(sz),
+            Some(sz) => fmt_bytes(sz as f32),
             None => String::from("?"),
         }
     }
@@ -144,7 +157,11 @@ impl Progress {
     }
 
     fn fmt_progress_bytes(&self) -> String {
-        fmt_bytes(self.progress)
+        fmt_bytes(self.progress as f32)
+    }
+
+    fn fmt_download_rate(&self) -> String {
+        format!("{}/s", fmt_bytes(self.download_rate as f32))
     }
 }
 
@@ -163,7 +180,7 @@ impl DownloadWatcher {
             rustbox: RustBox::init(Default::default()).unwrap(),
             quitting: false,
             num_files: num_files,
-            files_finished: 0
+            files_finished: 0,
         }
     }
 
@@ -181,47 +198,64 @@ impl DownloadWatcher {
                                            file_size: file_size,
                                            progress: 0,
                                            error: None,
+                                           start_time: Instant::now(),
+                                           download_rate: 0.0,
                                        });
             }
             Message::Success { thread_id } => {
                 self.status_map.remove(&thread_id);
                 self.files_finished += 1;
             }
-            Message::Downloading { thread_id, bytes_read } => {
+            Message::Downloading { thread_id, bytes_read } => {                
                 let mut e = self.status_map.get_mut(&thread_id).unwrap();
-                e.progress += bytes_read;
+                let new_progress = e.progress + bytes_read;
+                let elapsed = e.start_time.elapsed();
+                let download_rate = new_progress as f64 / elapsed.seconds();
+                e.download_rate = download_rate;
+                e.progress = new_progress;
             }
             Message::Error { err, thread_id } => {
-                let e = self.status_map.entry(thread_id).or_insert(Progress::new());
+                let e = self.status_map.entry(thread_id).or_insert_with(Progress::new);
                 e.error = Some(err);
             }
         }
         false
     }
 
+    #[allow(single_match)]
     pub fn output(&mut self) {
         self.rustbox.clear();
-        self.rustbox.print(0, 0, rustbox::RB_NORMAL, Color::White, Color::Black, &format!("Files downloaded: {}/{}", self.files_finished, self.num_files));
-        
+        self.rustbox.print(0,
+                           0,
+                           rustbox::RB_NORMAL,
+                           Color::White,
+                           Color::Black,
+                           &format!("Files downloaded: {}/{}",
+                                    self.files_finished,
+                                    self.num_files));
+        let width = self.rustbox.width();
+        let m = width / 2;
         for (y, progress) in self.status_map.values().enumerate() {
             let y = y + 1;
-            let name = if progress.file_name.len() >= 40 {
-                &progress.file_name[..40]
+            let name = if progress.file_name.len() >= m {
+                &progress.file_name[..m]
             } else {
                 &progress.file_name
             };
-
+            
+            
             let p = format!("{}/{}",
                             progress.fmt_progress_bytes(),
-                            progress.fmt_file_size());                        
+                            progress.fmt_file_size());
             self.rustbox.print(0, y, rustbox::RB_NORMAL, Color::White, Color::Black, name);
-            self.rustbox.print(40,
+            self.rustbox.print(m,
                                y,
                                rustbox::RB_NORMAL,
                                Color::White,
                                Color::Black,
                                &progress.fmt_progress_percent());
-            self.rustbox.print(50, y, rustbox::RB_NORMAL, Color::White, Color::Black, &p);
+            self.rustbox.print(m + 10, y, rustbox::RB_NORMAL, Color::White, Color::Black, &p);
+            self.rustbox.print(width - 15, y, rustbox::RB_NORMAL, Color::White, Color::Black, &progress.fmt_download_rate());
         }
 
         self.rustbox.present();
@@ -249,7 +283,7 @@ macro_rules! try_or_send {
     })
 }
 
-pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) -> DResult<()>
+pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32, timeout: u64, quiet: bool) -> DResult<()>
     where U: IntoUrl,
           P: AsRef<Path>
 {
@@ -257,29 +291,28 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
         panic!("Not enough paths for URLs")
     }
 
-    let file_count = urls.len();    
+    let file_count = urls.len();
     let workitem_queue = MsQueue::new();
-    let mut i = 0;
-    for (url, path) in urls.into_iter().zip(paths.into_iter()) {
+    for (i, (url, path)) in urls.into_iter().zip(paths.into_iter()).enumerate() {
         let path = path.as_ref();
         let workitem = WorkItem {
             path: path.to_path_buf(),
             url: url.into_url().unwrap(),
-            id: i,
+            id: i as u32,
         };
         workitem_queue.push(workitem);
-        i += 1;
     }
 
     let mut pool = Pool::new(thread_count);
-    let client = Arc::new(Client::new());
-    
+    // let client = Arc::new(Client::new());
+
     let message_queue = Arc::new(MsQueue::new());
     pool.scoped(|scope| {
         while let Some(item) = workitem_queue.try_pop() {
-            let client = client.clone();
             let message_queue = message_queue.clone();
             scope.execute(move || {
+                let mut client = Client::new();
+                client.set_read_timeout(Some(Duration::from_secs(timeout)));
                 let request = try_or_send!(client.get(item.url).send(), message_queue);
                 let length = request.headers.get::<ContentLength>().map(|c| c.0);
                 let path = item.path;
@@ -305,16 +338,23 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32) 
         }
         let message_queue = message_queue.clone();
         // Progress watcher thread
-        thread::spawn(move || {
-            let mut download_watcher = DownloadWatcher::new(file_count);
-            loop {
-                let msg = message_queue.pop();
-                if download_watcher.process(msg) {
-                    break;
+        if !quiet {
+            thread::spawn(move || {
+                let mut download_watcher = DownloadWatcher::new(file_count);
+                let dt = Duration::from_millis(25);
+                let mut last = Instant::now();
+                loop {
+                    let msg = message_queue.pop();
+                    if download_watcher.process(msg) {
+                        break;
+                    }
+                    if last.elapsed() > dt {
+                        download_watcher.output();
+                        last = Instant::now();
+                    }
                 }
-                download_watcher.output();
-            }
-        });
+            });
+        }
     });
     message_queue.push(Message::Done);
 
@@ -344,21 +384,33 @@ fn main() {
         .author("Martin Tomasi <martin.tomasi@gmail.com>")
         .about("Downloads multiple files in parallel.")
         .arg(Arg::with_name("file")
-             .short("f")
-             .long("file")
-             .help("Text file with an URL on each line")
-             .takes_value(true)
-             .required(true))
+            .short("f")
+            .long("file")
+            .help("Text file with an URL on each line")
+            .takes_value(true)
+            .required(true))
         .arg(Arg::with_name("threads")
-             .short("t")
-             .long("threads")
-             .help("Sets the number of concurrent downloads")
+            .short("t")
+            .long("threads")
+            .help("Sets the number of concurrent downloads")
+            .takes_value(true))
+        .arg(Arg::with_name("timeout")
+             .long("timeout")
+             .help("HTTP timeout per thread in seconds.")
              .takes_value(true))
+        .arg(Arg::with_name("quiet")
+             .short("q")
+             .long("quiet")
+             .help("No UI, no output."))
         .get_matches();
 
     let filepath = matches.value_of("file").unwrap();
-    let (urls, paths) = read_urls(&filepath);
-
-    let thread_count = matches.value_of("threads").map(|s| s.parse::<u32>().unwrap()).unwrap_or(4);
-    download_in_parallel(urls, &paths, thread_count).unwrap();
+    let (urls, paths) = read_urls(filepath);
+    let thread_count = matches.value_of("threads").map_or(4, |s| s.parse::<u32>().unwrap());
+    let timeout = matches.value_of("timeout").map_or(15, |s| s.parse::<u64>().unwrap());
+    let quiet = matches.is_present("quiet");
+    let start = Instant::now();
+    download_in_parallel(urls, &paths, thread_count, timeout, quiet).unwrap();
+    let elapsed = start.elapsed();
+    println!("#Threads: {}, Duration: {} seconds", thread_count, elapsed.seconds());
 }

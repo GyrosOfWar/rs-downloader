@@ -4,11 +4,18 @@ name = "downloader"
 version = "0.1.0"
 
 [dependencies]
-clap = "2.6.0"
+clap = "*"
 crossbeam = "*"
-hyper = "*"
-number_prefix = "0.2.5"
+hyper = {version = "*", default-features = false}
+number_prefix = "*"
 quick-error = "*"
-rustbox = "0.8.1"
+rustbox = "*"
 scoped_threadpool = "*"
 thread-id = "*"
+clippy = {version = "*", optional = true}
+
+[features]
+default = []
+
+[profile.release]
+debug = true
