@@ -1,6 +1,6 @@
 #![cfg_attr(feature="clippy", feature(plugin))]
 #![cfg_attr(feature="clippy", plugin(clippy))]
-#![allow(enum_variant_names)]
+// #![cfg_attr(feature="nightly", allow(enum_variant_names))]
 
 extern crate hyper;
 extern crate scoped_threadpool;
@@ -99,17 +99,9 @@ enum Message {
         file_name: String,
         file_size: Option<u64>,
     },
-    Downloading {
-        bytes_read: u64,
-        thread_id: usize,
-    },
-    Success {
-        thread_id: usize,
-    },
-    Error {
-        thread_id: usize,
-        err: DError,
-    },
+    Downloading { bytes_read: u64, thread_id: usize },
+    Success { thread_id: usize },
+    Error { thread_id: usize, err: DError },
     Done,
 }
 
@@ -138,10 +130,10 @@ impl Progress {
             progress: 0,
             error: None,
             start_time: Instant::now(),
-            download_rate: 0.0
+            download_rate: 0.0,
         }
     }
-    
+
     fn fmt_file_size(&self) -> String {
         match self.file_size {
             Some(sz) => fmt_bytes(sz as f32),
@@ -206,7 +198,7 @@ impl DownloadWatcher {
                 self.status_map.remove(&thread_id);
                 self.files_finished += 1;
             }
-            Message::Downloading { thread_id, bytes_read } => {                
+            Message::Downloading { thread_id, bytes_read } => {
                 let mut e = self.status_map.get_mut(&thread_id).unwrap();
                 let new_progress = e.progress + bytes_read;
                 let elapsed = e.start_time.elapsed();
@@ -222,7 +214,7 @@ impl DownloadWatcher {
         false
     }
 
-    #[allow(single_match)]
+    #[cfg_attr(feature="clippy", allow(single_match))]
     pub fn output(&mut self) {
         self.rustbox.clear();
         self.rustbox.print(0,
@@ -242,8 +234,8 @@ impl DownloadWatcher {
             } else {
                 &progress.file_name
             };
-            
-            
+
+
             let p = format!("{}/{}",
                             progress.fmt_progress_bytes(),
                             progress.fmt_file_size());
@@ -254,8 +246,18 @@ impl DownloadWatcher {
                                Color::White,
                                Color::Black,
                                &progress.fmt_progress_percent());
-            self.rustbox.print(m + 10, y, rustbox::RB_NORMAL, Color::White, Color::Black, &p);
-            self.rustbox.print(width - 15, y, rustbox::RB_NORMAL, Color::White, Color::Black, &progress.fmt_download_rate());
+            self.rustbox.print(m + 10,
+                               y,
+                               rustbox::RB_NORMAL,
+                               Color::White,
+                               Color::Black,
+                               &p);
+            self.rustbox.print(width - 15,
+                               y,
+                               rustbox::RB_NORMAL,
+                               Color::White,
+                               Color::Black,
+                               &progress.fmt_download_rate());
         }
 
         self.rustbox.present();
@@ -283,7 +285,12 @@ macro_rules! try_or_send {
     })
 }
 
-pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32, timeout: u64, quiet: bool) -> DResult<()>
+pub fn download_in_parallel<U, P>(urls: Vec<U>,
+                                  paths: &[P],
+                                  thread_count: u32,
+                                  timeout: u64,
+                                  quiet: bool)
+                                  -> DResult<()>
     where U: IntoUrl,
           P: AsRef<Path>
 {
@@ -304,7 +311,6 @@ pub fn download_in_parallel<U, P>(urls: Vec<U>, paths: &[P], thread_count: u32, 
     }
 
     let mut pool = Pool::new(thread_count);
-    // let client = Arc::new(Client::new());
 
     let message_queue = Arc::new(MsQueue::new());
     pool.scoped(|scope| {
@@ -395,13 +401,13 @@ fn main() {
             .help("Sets the number of concurrent downloads")
             .takes_value(true))
         .arg(Arg::with_name("timeout")
-             .long("timeout")
-             .help("HTTP timeout per thread in seconds.")
-             .takes_value(true))
+            .long("timeout")
+            .help("HTTP timeout per thread in seconds.")
+            .takes_value(true))
         .arg(Arg::with_name("quiet")
-             .short("q")
-             .long("quiet")
-             .help("No UI, no output."))
+            .short("q")
+            .long("quiet")
+            .help("No UI, no output."))
         .get_matches();
 
     let filepath = matches.value_of("file").unwrap();
@@ -412,5 +418,7 @@ fn main() {
     let start = Instant::now();
     download_in_parallel(urls, &paths, thread_count, timeout, quiet).unwrap();
     let elapsed = start.elapsed();
-    println!("#Threads: {}, Duration: {} seconds", thread_count, elapsed.seconds());
+    println!("#Threads: {}, Duration: {} seconds",
+             thread_count,
+             elapsed.seconds());
 }
